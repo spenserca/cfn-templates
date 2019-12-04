@@ -1,0 +1,20 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - yarn
+      - yarn lint
+      - yarn test
+      - yarn build
+
+artifacts:
+  secondary-artifacts:
+    website:
+      discard-paths: yes
+      files:
+        - '**/dist/*'
+    cloudformation:
+      discard-paths: yes
+      files:
+        - '**/s3-static-site.yml'

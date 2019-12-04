@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  SiteName:
+    Type: String
+
+Resources:
+  StaticSite:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Sub ${SiteName}
+      WebsiteConfiguration:
+        ErrorDocument: index.html
+        IndexDocument: index.html
+  StaticSitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticSite
+      PolicyDocument:
+        Statement:
+          - Action: s3:GetObject
+            Effect: Allow
+            Resource: !Sub arn:aws:s3:::${StaticSite}/*
+            Principal: '*'
+  WwwStaticSite:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Sub www.${SiteName}
+      WebsiteConfiguration:
+        ErrorDocument: index.html
+        IndexDocument: index.html
+  WwwStaticSitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WwwStaticSite
+      PolicyDocument:
+        Statement:
+          - Action: s3:GetObject
+            Effect: Allow
+            Resource: !Sub arn:aws:s3:::${WwwStaticSite}/*
+            Principal: '*'
+
+Outputs:
+  WebsiteURL:
+    Value: !GetAtt StaticSite.WebsiteURL
+  DomainName:
+    Value: !GetAtt StaticSite.DomainName

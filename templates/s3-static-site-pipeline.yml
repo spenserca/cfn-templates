@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  RepoOwner:
+    Type: String
+  Repo:
+    Type: String
+  GitHubToken:
+    Type: String
+  SiteName:
+    Type: String
+  StackName:
+    Type: String
+
+Resources:
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Pipeline
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+                - codebuild.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess
+  DeployerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Deployer
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              AWS:
+                - !GetAtt PipelineRole.Arn
+              Service:
+                - cloudformation.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+  ArtifactEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Key used for encrypting build artifacts
+      KeyPolicy:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:*
+            Resource: '*'
+            Principal:
+              AWS:
+                - !GetAtt PipelineRole.Arn
+                - !GetAtt DeployerRole.Arn
+  ArtifactStore:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub ${SiteName}-artifact-store
+  ArtifactStorePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactStore
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: s3:*
+            Resource:
+              - !Sub arn:aws:s3:::${ArtifactStore}
+              - !Sub arn:aws:s3:::${ArtifactStore}/*
+            Principal:
+              AWS:
+                - !GetAtt PipelineRole.Arn
+                - !GetAtt DeployerRole.Arn
+  BuildStep:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      EncryptionKey: !GetAtt ArtifactEncryptionKey.Arn
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/docker:17.09.0
+        Type: LINUX_CONTAINER
+      Name:
+        !Sub ${SiteName}-build
+      ServiceRole:
+        !GetAtt PipelineRole.Arn
+      Source:
+        BuildSpec: templates/build.yml
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RestartExecutionOnUpdate: true
+      ArtifactStore:
+        Location: !Ref ArtifactStore
+        Type: S3
+        EncryptionKey:
+          Id: !GetAtt ArtifactEncryptionKey.Arn
+          Type: KMS
+      Name:
+        !Sub ${SiteName}-pipeline
+      RoleArn:
+        !GetAtt PipelineRole.Arn
+      Stages:
+        - Name: source
+          Actions:
+            - Name:
+                !Sub ${SiteName}-source
+              ActionTypeId:
+                Category: Source
+                Provider: GitHub
+                Owner: ThirdParty
+                Version: '1'
+              Configuration:
+                Owner: !Ref RepoOwner
+                Repo: !Ref Repo
+                OAuthToken: !Ref GitHubToken
+                PollForSourceChanges: true
+                Branch: master
+              OutputArtifacts:
+                - Name:
+                    !Sub ${SiteName}-source
+              InputArtifacts: []
+              RunOrder: 1
+        - Name: build
+          Actions:
+            - Name:
+                !Sub ${SiteName}-build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName:
+                  !Sub ${SiteName}-build
+              RunOrder: 1
+              InputArtifacts:
+                - Name:
+                    !Sub ${SiteName}-source
+              OutputArtifacts:
+                - Name: website
+                - Name: cloudformation
+        - Name: deploy_dev
+          Actions:
+            - Name: deploy_dev_resources
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              InputArtifacts:
+                - Name: cloudformation
+              Configuration:
+                StackName: !Ref StackName
+                ActionMode: CREATE_UPDATE
+                TemplatePath: cloudformation::static-site-s3.yml
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                ParameterOverrides: '{"SiteName": "dev.my.site.com"}'
+                RoleArn: !GetAtt DeployerRole.Arn
+              RunOrder: 1
+            - Name: deploy_dev_code
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: 1
+              InputArtifacts:
+                - Name: website
+              Configuration:
+                BucketName: !Sub dev.${SiteName}
+                Extract: true
+              RunOrder: 2
+        - Name: deploy_prod
+          Actions:
+            - Name: deploy_prod_approval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: '1'
+                Provider: Manual
+              InputArtifacts: []
+              OutputArtifacts: []
+              RunOrder: 1
+            - Name: deploy_prod_resources
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              InputArtifacts:
+                - Name: cloudformation
+              Configuration:
+                StackName: !Ref StackName
+                ActionMode: CREATE_UPDATE
+                TemplatePath: cloudformation::static-site-s3.yml
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                ParameterOverrides: '{"SiteName": "my.site.com"}'
+                RoleArn: !GetAtt DeployerRole.Arn
+              RunOrder: 2
+            - Name: deploy_prod_code
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: 1
+              InputArtifacts:
+                - Name: website
+              Configuration:
+                BucketName: !Ref SiteName
+                Extract: true
+              RunOrder: 3
